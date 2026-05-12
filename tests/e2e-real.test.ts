@@ -1,13 +1,16 @@
 import { describe, it, expect, afterAll } from "vitest";
 import { Agent } from "../src/agent.js";
 import { resolve } from "node:path";
+import { existsSync } from "node:fs";
 
 const FFMPEG_SERVER = resolve(
   process.env.HOME ?? process.env.USERPROFILE ?? "C:/Users/jiaxuan",
   "Documents/Codex/video-anime-pipeline/mcp-servers/ffmpeg/dist/index.js",
 );
 
-describe("E2E: Real MCP servers", () => {
+const hasFfmpegServer = existsSync(FFMPEG_SERVER);
+
+describe.skipIf(!hasFfmpegServer)("E2E: Real MCP servers", () => {
   let agent: Agent;
 
   afterAll(async () => {
@@ -52,7 +55,7 @@ describe("E2E: Real MCP servers", () => {
   });
 });
 
-describe("E2E: Agent loop with mock LLM", () => {
+describe.skipIf(!hasFfmpegServer)("E2E: Agent loop with mock LLM", () => {
   it("should complete a full agent loop with tool calls", { timeout: 60_000 }, async () => {
     // This test verifies the agent loop works by connecting to a real MCP server
     // and checking that the loop structure is correct (without needing a real LLM)

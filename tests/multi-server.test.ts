@@ -3,6 +3,7 @@ import { Agent } from "../src/agent.js";
 import { MCPPool } from "../src/pool.js";
 import { ToolRouter } from "../src/router.js";
 import { resolve } from "node:path";
+import { existsSync } from "node:fs";
 
 const __dirname = new URL(".", import.meta.url).pathname.replace(/^\/([A-Z]:)/, "$1");
 const MOCK_SERVER = resolve(__dirname, "fixtures", "mock-server.ts");
@@ -11,7 +12,9 @@ const FFMPEG_SERVER = resolve(
   "Documents/Codex/video-anime-pipeline/mcp-servers/ffmpeg/dist/index.js",
 );
 
-describe("Multi-server routing", () => {
+const hasFfmpegServer = existsSync(FFMPEG_SERVER);
+
+describe.skipIf(!hasFfmpegServer)("Multi-server routing", () => {
   let pool: MCPPool;
   let router: ToolRouter;
 
