@@ -188,6 +188,11 @@ export class Agent {
     this.history = [];
   }
 
+  /** Set max history message count */
+  setMaxHistory(max: number): void {
+    this.maxHistory = max;
+  }
+
   /** Get the last assistant message from a result */
   getLastResponse(result: AgentResult): string {
     for (let i = result.messages.length - 1; i >= 0; i--) {
