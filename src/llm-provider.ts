@@ -73,6 +73,7 @@ export class OpenAIProvider implements LLMProvider {
       temperature: this.temperature,
       stream,
     };
+    if (stream) body.stream_options = { include_usage: true };
     if (tools && tools.length > 0) body.tools = tools;
     return body;
   }
@@ -162,6 +163,7 @@ export class OpenAIProvider implements LLMProvider {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let streamUsage: { prompt: number; completion: number } | undefined;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -175,8 +177,13 @@ export class OpenAIProvider implements LLMProvider {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith(":") || trimmed === "data: [DONE]" || !trimmed.startsWith("data: ")) continue;
 
-        let chunk: { choices: Array<{ delta: { content?: string; tool_calls?: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }> } }> };
+        let chunk: { choices: Array<{ delta: { content?: string; tool_calls?: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }> } }>; usage?: { prompt_tokens: number; completion_tokens: number } };
         try { chunk = JSON.parse(trimmed.slice(6)); } catch { continue; }
+
+        // Extract usage from the final chunk (sent when stream_options.include_usage is true)
+        if (chunk.usage) {
+          streamUsage = { prompt: chunk.usage.prompt_tokens, completion: chunk.usage.completion_tokens };
+        }
 
         const delta = chunk.choices[0]?.delta;
         if (!delta) continue;
@@ -209,9 +216,9 @@ export class OpenAIProvider implements LLMProvider {
     }));
 
     for (const tc of toolCalls) callbacks?.onToolCall?.(tc);
-    logger.debug("LLM stream done:", { contentLen: fullContent.length, toolCalls: toolCalls.length });
+    logger.debug("LLM stream done:", { contentLen: fullContent.length, toolCalls: toolCalls.length, usage: streamUsage });
 
-    return { content: fullContent, toolCalls };
+    return { content: fullContent, toolCalls, usage: streamUsage };
   }
 
   private parseJSON(s: string): Record<string, unknown> {

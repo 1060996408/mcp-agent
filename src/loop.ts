@@ -72,6 +72,7 @@ export class AgentLoop {
           });
           if (llmCtx.error) throw llmCtx.error;
           if (!response) throw new Error("LLM call skipped by middleware");
+          if (response.usage) llmCtx.metadata._tokensUsed = response.usage.prompt + response.usage.completion;
           llmCtx.result = { content: response.content, toolCalls: response.toolCalls };
           await runHooks(this.middleware, "afterLLM", llmCtx, async () => {});
           break;
@@ -154,6 +155,7 @@ export class AgentLoop {
     const tools = this.router.getOpenAITools();
     let toolCallsExecuted = 0;
     let rounds = 0;
+    let totalTokens = 0;
 
     this.events.emit("runStart", { userMessage: messages[messages.length - 1]?.content ?? "", messageCount: messages.length });
 
@@ -169,7 +171,7 @@ export class AgentLoop {
       this.events.emit("beforeLLM", { round: rounds, messageCount: allMessages.length });
 
       // LLM streaming call with middleware hooks
-      let response: { content: string; toolCalls: ToolCall[] } | undefined;
+      let response: { content: string; toolCalls: ToolCall[]; usage?: { prompt: number; completion: number } } | undefined;
       const llmMetadata: Record<string, unknown> = {};
       while (true) {
         const llmCtx: MiddlewareContext = { type: "llm", messages: allMessages, metadata: llmMetadata };
@@ -183,6 +185,7 @@ export class AgentLoop {
           });
           if (llmCtx.error) throw llmCtx.error;
           if (!response) throw new Error("LLM call skipped by middleware");
+          if (response.usage) llmCtx.metadata._tokensUsed = response.usage.prompt + response.usage.completion;
           llmCtx.result = { content: response.content, toolCalls: response.toolCalls };
           await runHooks(this.middleware, "afterLLM", llmCtx, async () => {});
           break;
@@ -202,7 +205,12 @@ export class AgentLoop {
         round: rounds,
         content: response.content,
         toolCallCount: response.toolCalls.length,
+        tokensUsed: response.usage ? response.usage.prompt + response.usage.completion : undefined,
       });
+
+      if (response.usage) {
+        totalTokens += response.usage.prompt + response.usage.completion;
+      }
 
       // If no tool calls, we're done
       if (response.toolCalls.length === 0) {
@@ -240,12 +248,14 @@ export class AgentLoop {
 
     this.events.emit("runEnd", {
       toolCallsExecuted,
+      tokensUsed: totalTokens > 0 ? totalTokens : undefined,
       rounds,
     });
 
     return {
       messages: allMessages,
       toolCallsExecuted,
+      tokensUsed: totalTokens > 0 ? totalTokens : undefined,
     };
   }
 
