@@ -201,6 +201,8 @@ export interface BudgetConfig {
   wallClockMs?: number;
   /** Maximum time per individual tool call in ms (default: 60000 = 1min) */
   perToolMs?: number;
+  /** Maximum total tokens (prompt + completion) per run */
+  maxTokens?: number;
 }
 
 /**
@@ -212,13 +214,16 @@ export class BudgetMeter implements Middleware {
   private maxToolCalls: number;
   private wallClockMs: number;
   private perToolMs: number;
+  private maxTokens: number;
   private runStart = 0;
   private toolCallCount = 0;
+  private tokenCount = 0;
 
   constructor(config?: BudgetConfig) {
     this.maxToolCalls = config?.maxToolCalls ?? 50;
     this.wallClockMs = config?.wallClockMs ?? 300_000;
     this.perToolMs = config?.perToolMs ?? 60_000;
+    this.maxTokens = config?.maxTokens ?? Infinity;
   }
 
   beforeLLM = async (ctx: MiddlewareContext, next: Next) => {
@@ -229,6 +234,19 @@ export class BudgetMeter implements Middleware {
       ctx.error = new Error(`Budget exceeded: wall clock limit (${this.wallClockMs}ms) reached after ${elapsed}ms`);
       ctx.metadata._budgetExceeded = true;
       return; // Don't call next
+    }
+    await next();
+  };
+
+  afterLLM = async (ctx: MiddlewareContext, next: Next) => {
+    const tokens = ctx.metadata._tokensUsed as number | undefined;
+    if (tokens) {
+      this.tokenCount += tokens;
+      if (this.tokenCount > this.maxTokens) {
+        ctx.error = new Error(`Budget exceeded: token limit (${this.maxTokens}) reached (${this.tokenCount} used)`);
+        ctx.metadata._budgetExceeded = true;
+        return;
+      }
     }
     await next();
   };
@@ -258,11 +276,12 @@ export class BudgetMeter implements Middleware {
   resetRun(): void {
     this.runStart = Date.now();
     this.toolCallCount = 0;
+    this.tokenCount = 0;
   }
 
   /** Get current stats */
-  stats(): { toolCalls: number; elapsedMs: number } {
-    return { toolCalls: this.toolCallCount, elapsedMs: Date.now() - this.runStart };
+  stats(): { toolCalls: number; elapsedMs: number; tokens: number } {
+    return { toolCalls: this.toolCallCount, elapsedMs: Date.now() - this.runStart, tokens: this.tokenCount };
   }
 }
 
