@@ -3,3 +3,5 @@ dist/
 *.tsbuildinfo
 .env
 .env.*
+deepseek_production_tests.py
+deepseek-tool-test.md

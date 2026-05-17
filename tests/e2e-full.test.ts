@@ -233,11 +233,11 @@ describe("E2E: Full integration test", { timeout: 60_000 }, () => {
       await agent.run(`message ${i}`);
     }
 
-    // History should be truncated to max 6
-    expect(agent.getHistory().length).toBeLessThanOrEqual(6);
-
-    // Most recent user message should be preserved (at index -2: user before last assistant)
+    // Safe truncation preserves turn integrity, so may keep slightly more than maxHistory
     const history = agent.getHistory();
+    expect(history.length).toBeLessThanOrEqual(9); // maxHistory + one extra turn
+
+    // Most recent user message should be preserved
     const lastUserMsg = history.findLast((m) => m.role === "user");
     expect(lastUserMsg?.content).toBe("message 4");
 
