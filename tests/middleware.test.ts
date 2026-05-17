@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
-import { runHooks, LoggingMiddleware, RetryMiddleware } from "../src/middleware.js";
+import { runHooks, LoggingMiddleware, RetryMiddleware, BudgetMeter } from "../src/middleware.js";
 import type { Middleware, MiddlewareContext, Next } from "../src/middleware.js";
 import { MCPPool } from "../src/pool.js";
 import { ToolRouter } from "../src/router.js";
@@ -323,5 +323,122 @@ describe("RetryMiddleware", () => {
 
     await mw.onError!(ctx, async () => {});
     expect(ctx.metadata._shouldRetry).toBeUndefined();
+  });
+});
+
+// ── BudgetMeter ─────────────────────────────────────────────────────
+
+describe("BudgetMeter", () => {
+  it("should instantiate with defaults", () => {
+    const bm = new BudgetMeter();
+    const s = bm.stats();
+    expect(s.toolCalls).toBe(0);
+    expect(s.tokens).toBe(0);
+  });
+
+  it("should block when maxTokens exceeded in afterLLM", async () => {
+    const bm = new BudgetMeter({ maxTokens: 100 });
+    const ctx: MiddlewareContext = {
+      type: "llm",
+      metadata: { _tokensUsed: 150 },
+      result: { content: "ok", toolCalls: [] },
+    };
+
+    await bm.afterLLM!(ctx, async () => {});
+    expect(ctx.error).toBeDefined();
+    expect(ctx.error!.message).toContain("token limit");
+    expect(ctx.metadata._budgetExceeded).toBe(true);
+  });
+
+  it("should allow afterLLM when under token limit", async () => {
+    const bm = new BudgetMeter({ maxTokens: 200 });
+    const ctx: MiddlewareContext = {
+      type: "llm",
+      metadata: { _tokensUsed: 50 },
+      result: { content: "ok", toolCalls: [] },
+    };
+
+    let nextCalled = false;
+    await bm.afterLLM!(ctx, async () => { nextCalled = true; });
+    expect(nextCalled).toBe(true);
+    expect(ctx.error).toBeUndefined();
+    expect(bm.stats().tokens).toBe(50);
+  });
+
+  it("should accumulate tokens across multiple afterLLM calls", async () => {
+    const bm = new BudgetMeter({ maxTokens: 200 });
+
+    const ctx1: MiddlewareContext = { type: "llm", metadata: { _tokensUsed: 80 }, result: { content: "a", toolCalls: [] } };
+    await bm.afterLLM!(ctx1, async () => {});
+
+    const ctx2: MiddlewareContext = { type: "llm", metadata: { _tokensUsed: 90 }, result: { content: "b", toolCalls: [] } };
+    await bm.afterLLM!(ctx2, async () => {});
+
+    expect(bm.stats().tokens).toBe(170);
+    expect(ctx2.error).toBeUndefined();
+
+    // Third call pushes over the limit
+    const ctx3: MiddlewareContext = { type: "llm", metadata: { _tokensUsed: 50 }, result: { content: "c", toolCalls: [] } };
+    await bm.afterLLM!(ctx3, async () => {});
+    expect(ctx3.error).toBeDefined();
+    expect(ctx3.error!.message).toContain("220 used");
+  });
+
+  it("should reset token count via resetRun()", async () => {
+    const bm = new BudgetMeter({ maxTokens: 100 });
+    const ctx1: MiddlewareContext = { type: "llm", metadata: { _tokensUsed: 80 }, result: { content: "a", toolCalls: [] } };
+    await bm.afterLLM!(ctx1, async () => {});
+    expect(bm.stats().tokens).toBe(80);
+
+    bm.resetRun();
+    expect(bm.stats().tokens).toBe(0);
+    expect(bm.stats().toolCalls).toBe(0);
+  });
+
+  it("should enforce tool call limit", async () => {
+    const bm = new BudgetMeter({ maxToolCalls: 2, wallClockMs: 60_000 });
+    bm.resetRun();
+
+    const ctx1: MiddlewareContext = { type: "tool", toolCall: { id: "1", name: "a", arguments: {} }, metadata: {} };
+    await bm.beforeToolCall!(ctx1, async () => {});
+    expect(ctx1.error).toBeUndefined();
+
+    const ctx2: MiddlewareContext = { type: "tool", toolCall: { id: "2", name: "b", arguments: {} }, metadata: {} };
+    await bm.beforeToolCall!(ctx2, async () => {});
+    expect(ctx2.error).toBeUndefined();
+
+    // Third call exceeds limit
+    const ctx3: MiddlewareContext = { type: "tool", toolCall: { id: "3", name: "c", arguments: {} }, metadata: {} };
+    await bm.beforeToolCall!(ctx3, async () => {});
+    expect(ctx3.error).toBeDefined();
+    expect(ctx3.error!.message).toContain("tool call limit");
+  });
+
+  it("should skip token accounting when no _tokensUsed in metadata", async () => {
+    const bm = new BudgetMeter({ maxTokens: 100 });
+    const ctx: MiddlewareContext = { type: "llm", metadata: {}, result: { content: "ok", toolCalls: [] } };
+
+    let nextCalled = false;
+    await bm.afterLLM!(ctx, async () => { nextCalled = true; });
+    expect(nextCalled).toBe(true);
+    expect(bm.stats().tokens).toBe(0);
+  });
+
+  it("should return correct stats", async () => {
+    const bm = new BudgetMeter({ maxToolCalls: 50, maxTokens: 1000 });
+    bm.resetRun();
+
+    // Simulate a beforeToolCall
+    const toolCtx: MiddlewareContext = { type: "tool", toolCall: { id: "1", name: "echo", arguments: {} }, metadata: {} };
+    await bm.beforeToolCall!(toolCtx, async () => {});
+
+    // Simulate an afterLLM with tokens
+    const llmCtx: MiddlewareContext = { type: "llm", metadata: { _tokensUsed: 42 }, result: { content: "x", toolCalls: [] } };
+    await bm.afterLLM!(llmCtx, async () => {});
+
+    const s = bm.stats();
+    expect(s.toolCalls).toBe(1);
+    expect(s.tokens).toBe(42);
+    expect(s.elapsedMs).toBeGreaterThanOrEqual(0);
   });
 });
