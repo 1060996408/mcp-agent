@@ -3,10 +3,18 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 
 /** Configuration for a single MCP server */
 export interface MCPServerConfig {
-  command: string;
+  /** Transport type: "stdio" (default), "sse", or "streamable-http" */
+  transport?: "stdio" | "sse" | "streamable-http";
+  /** Command to spawn (stdio transport) */
+  command?: string;
+  /** Arguments for the command (stdio transport) */
   args?: string[];
+  /** Environment variables (stdio transport) */
   env?: Record<string, string>;
+  /** Working directory (stdio transport) */
   cwd?: string;
+  /** URL of the MCP server (sse / streamable-http transport) */
+  url?: string;
 }
 
 /** Agent configuration loaded from JSON */
@@ -22,12 +30,18 @@ export interface RouterConfig {
   conflictStrategy?: "error" | "prefix" | "first-wins";
   /** Enable semantic fallback when exact tool name match fails (default: true) */
   semanticFallback?: boolean;
+  /** Only expose tools matching these patterns (glob-style with *) */
+  allowTools?: string[];
+  /** Hide tools matching these patterns (glob-style with *) */
+  denyTools?: string[];
 }
 
 /** Conversation history configuration */
 export interface ConversationConfig {
   /** Maximum number of messages to keep in history (default: 100) */
   maxHistoryMessages?: number;
+  /** Maximum tool call rounds per run (default: 20) */
+  maxToolRounds?: number;
 }
 
 /** LLM provider configuration */
@@ -37,6 +51,8 @@ export interface LLMConfig {
   model?: string;
   maxTokens?: number;
   temperature?: number;
+  /** Request timeout in milliseconds (default: 120000) */
+  timeout?: number;
 }
 
 /** A connected MCP server instance */

@@ -17,10 +17,12 @@ const MOCK_SERVER = resolve(__dirname, "fixtures", "mock-server.ts");
  */
 class MockStreamLLM extends LLMClient {
   private responseText: string;
+  private usage?: { prompt: number; completion: number };
 
-  constructor(responseText: string) {
+  constructor(responseText: string, usage?: { prompt: number; completion: number }) {
     super({ baseUrl: "http://localhost:1", apiKey: "test", model: "mock" });
     this.responseText = responseText;
+    this.usage = usage;
   }
 
   override async streamChat(
@@ -35,7 +37,7 @@ class MockStreamLLM extends LLMClient {
       await new Promise((r) => setTimeout(r, 1));
     }
 
-    return { content: this.responseText, toolCalls: [] };
+    return { content: this.responseText, toolCalls: [], usage: this.usage };
   }
 }
 
@@ -153,5 +155,56 @@ describe("Streaming support", () => {
 
     expect(tokens).toHaveLength(0);
     expect(result.messages[2].content).toBe("");
+  });
+
+  it("should track tokensUsed when usage is provided", async () => {
+    const llm = new MockStreamLLM("hello", { prompt: 100, completion: 50 });
+    const loop = new AgentLoop(llm, router);
+
+    const result = await loop.runStream([
+      { role: "user", content: "test" },
+    ]);
+
+    expect(result.tokensUsed).toBe(150);
+  });
+
+  it("should accumulate tokens across multiple streaming rounds", async () => {
+    const llm = new MockStreamToolLLM();
+    // MockStreamToolLLM doesn't return usage; use a wrapper
+    class UsageStreamToolLLM extends LLMClient {
+      private callCount = 0;
+      constructor() {
+        super({ baseUrl: "http://localhost:1", apiKey: "test", model: "mock" });
+      }
+      override async streamChat(
+        _messages: Message[],
+        _tools?: Parameters<LLMClient["streamChat"]>[1],
+        callbacks?: StreamCallbacks,
+      ): Promise<Awaited<ReturnType<LLMClient["streamChat"]>>> {
+        this.callCount++;
+        if (this.callCount === 1) {
+          const tc = { id: "call_1", name: "echo", arguments: { text: "hi" } };
+          callbacks?.onToolCall?.(tc);
+          return { content: "", toolCalls: [tc], usage: { prompt: 80, completion: 20 } };
+        }
+        return { content: "done", toolCalls: [], usage: { prompt: 90, completion: 30 } };
+      }
+    }
+
+    const usageLlm = new UsageStreamToolLLM();
+    const loop = new AgentLoop(usageLlm, router);
+    const result = await loop.runStream([{ role: "user", content: "test" }]);
+
+    // 80+20 + 90+30 = 220
+    expect(result.tokensUsed).toBe(220);
+    expect(result.toolCallsExecuted).toBe(1);
+  });
+
+  it("should report undefined tokensUsed when no usage returned", async () => {
+    const llm = new MockStreamLLM("no usage here");
+    const loop = new AgentLoop(llm, router);
+
+    const result = await loop.runStream([{ role: "user", content: "test" }]);
+    expect(result.tokensUsed).toBeUndefined();
   });
 });

@@ -5,15 +5,21 @@ import type { AggregatedTool, MCPServerInstance, RouterConfig } from "./types.js
  * Routes tool calls to the correct MCP server.
  * Builds a unified tool index from all connected servers.
  */
+export type LocalToolHandler = (args: Record<string, unknown>) => Promise<{ content: string; isError: boolean }>;
+
 export class ToolRouter {
   private tools = new Map<string, AggregatedTool>();
   private servers = new Map<string, MCPServerInstance>();
+  private localHandlers = new Map<string, LocalToolHandler>();
+  private aliases = new Map<string, string>(); // alias → real tool name
   private config: Required<RouterConfig>;
 
   constructor(config?: RouterConfig) {
     this.config = {
       conflictStrategy: config?.conflictStrategy ?? "prefix",
       semanticFallback: config?.semanticFallback ?? true,
+      allowTools: config?.allowTools ?? [],
+      denyTools: config?.denyTools ?? [],
     };
   }
 
@@ -79,9 +85,16 @@ export class ToolRouter {
     }
   }
 
-  /** Get all aggregated tools (for LLM tool definitions) */
+  /** Get all aggregated tools (for LLM tool definitions), filtered by allow/deny */
   getAll(): AggregatedTool[] {
-    return Array.from(this.tools.values());
+    let tools = Array.from(this.tools.values());
+    if (this.config.allowTools.length > 0) {
+      tools = tools.filter((t) => this.config.allowTools.some((pat) => matchGlob(pat, t.name)));
+    }
+    if (this.config.denyTools.length > 0) {
+      tools = tools.filter((t) => !this.config.denyTools.some((pat) => matchGlob(pat, t.name)));
+    }
+    return tools;
   }
 
   /** Get tools formatted as OpenAI-compatible tool definitions */
@@ -99,9 +112,17 @@ export class ToolRouter {
     }));
   }
 
-  /** Look up which server owns a tool */
+  /** Register a tool alias (e.g., alias("read", "filesystem__read_file")) */
+  alias(aliasName: string, realName: string): void {
+    this.aliases.set(aliasName, realName);
+  }
+
+  /** Look up which server owns a tool (supports aliases) */
   resolve(toolName: string): { server: MCPServerInstance; tool: AggregatedTool } | undefined {
-    const tool = this.tools.get(toolName);
+    // Check aliases first
+    const resolvedName = this.aliases.get(toolName) ?? toolName;
+
+    const tool = this.tools.get(resolvedName);
     if (tool) {
       const server = this.servers.get(tool.serverName);
       if (server) return { server, tool };
@@ -142,11 +163,35 @@ export class ToolRouter {
     return bestScore > 0 ? bestTool : undefined;
   }
 
+  /** Register a local tool (not backed by an MCP server) */
+  registerLocalTool(
+    name: string,
+    description: string,
+    inputSchema: Record<string, unknown>,
+    handler: LocalToolHandler,
+  ): void {
+    this.tools.set(name, { name, description, inputSchema, serverName: "__local__" });
+    this.localHandlers.set(name, handler);
+  }
+
   /** Execute a tool call on the correct server */
   async callTool(
     toolName: string,
     args: Record<string, unknown>,
   ): Promise<{ content: string; isError: boolean }> {
+    // Check local handlers first
+    const localHandler = this.localHandlers.get(toolName);
+    if (localHandler) {
+      logger.debug(`Calling local tool ${toolName}`, args);
+      try {
+        return await localHandler(args);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        logger.error(`Local tool call failed: ${toolName}`, msg);
+        return { content: `Tool error: ${msg}`, isError: true };
+      }
+    }
+
     const resolved = this.resolve(toolName);
     if (!resolved) {
       return { content: `Unknown tool: ${toolName}`, isError: true };
@@ -180,6 +225,21 @@ export class ToolRouter {
   get size(): number {
     return this.tools.size;
   }
+
+  /** Get tools from a specific server */
+  getToolsByServer(serverName: string): AggregatedTool[] {
+    return Array.from(this.tools.values()).filter((t) => t.serverName === serverName);
+  }
+
+  /** Get which server owns a tool (lightweight, no connection lookup) */
+  getServerForTool(toolName: string): string | undefined {
+    return this.tools.get(toolName)?.serverName;
+  }
+
+  /** Get all connected server names */
+  getServerNames(): string[] {
+    return Array.from(this.servers.keys());
+  }
 }
 
 /** Tokenize a string into lowercase words */
@@ -200,4 +260,12 @@ function overlapScore(queryWords: string[], targetWords: string[]): number {
     if (set.has(w)) score++;
   }
   return score;
+}
+
+/** Simple glob pattern matching (supports * wildcard) */
+function matchGlob(pattern: string, name: string): boolean {
+  const regex = new RegExp(
+    "^" + pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$",
+  );
+  return regex.test(name);
 }

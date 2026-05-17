@@ -1,7 +1,46 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { logger } from "./logger.js";
 import type { MCPServerConfig, MCPServerInstance } from "./types.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+
+/** Health status for a single server */
+export interface ServerHealth {
+  name: string;
+  connected: boolean;
+  healthy: boolean;
+  toolCount?: number;
+  error?: string;
+  latencyMs?: number;
+}
+
+function createTransport(config: MCPServerConfig): Transport {
+  const transportType = config.transport ?? (config.command ? "stdio" : undefined);
+
+  switch (transportType) {
+    case "stdio": {
+      if (!config.command) throw new Error("stdio transport requires 'command'");
+      return new StdioClientTransport({
+        command: config.command,
+        args: config.args ?? [],
+        env: config.env,
+        cwd: config.cwd,
+      });
+    }
+    case "sse": {
+      if (!config.url) throw new Error("sse transport requires 'url'");
+      return new SSEClientTransport(new URL(config.url));
+    }
+    case "streamable-http": {
+      if (!config.url) throw new Error("streamable-http transport requires 'url'");
+      return new StreamableHTTPClientTransport(new URL(config.url));
+    }
+    default:
+      throw new Error(`Unknown transport type: "${transportType}". Use "stdio", "sse", or "streamable-http".`);
+  }
+}
 
 /**
  * Manages connections to multiple MCP servers.
@@ -9,6 +48,7 @@ import type { MCPServerConfig, MCPServerInstance } from "./types.js";
  */
 export class MCPPool {
   private instances = new Map<string, MCPServerInstance>();
+  private configs = new Map<string, MCPServerConfig>();
 
   /** Connect to a single MCP server */
   async connect(name: string, config: MCPServerConfig): Promise<MCPServerInstance> {
@@ -17,14 +57,10 @@ export class MCPPool {
       return this.instances.get(name)!;
     }
 
+    this.configs.set(name, config);
     logger.info(`Connecting to MCP server '${name}'...`);
 
-    const transport = new StdioClientTransport({
-      command: config.command,
-      args: config.args ?? [],
-      env: config.env,
-      cwd: config.cwd,
-    });
+    const transport = createTransport(config);
 
     const client = new Client(
       { name: "mcp-agent", version: "0.1.0" },
@@ -82,6 +118,72 @@ export class MCPPool {
   /** Check if a server is connected */
   has(name: string): boolean {
     return this.instances.has(name);
+  }
+
+  /** Reconnect to a server (close existing, then connect fresh) */
+  async reconnect(name: string): Promise<MCPServerInstance> {
+    const config = this.configs.get(name);
+    if (!config) throw new Error(`No config stored for server '${name}', cannot reconnect`);
+
+    // Close existing connection if any
+    const existing = this.instances.get(name);
+    if (existing) {
+      try {
+        await existing.client.close();
+      } catch { /* ignore close errors */ }
+      this.instances.delete(name);
+    }
+
+    logger.info(`Reconnecting to '${name}'...`);
+    return this.connect(name, config);
+  }
+
+  /** Reconnect to a server with retry (exponential backoff) */
+  async reconnectWithRetry(name: string, maxRetries = 3, baseDelayMs = 1000): Promise<MCPServerInstance> {
+    let lastError: Error | undefined;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await this.reconnect(name);
+      } catch (e) {
+        lastError = e instanceof Error ? e : new Error(String(e));
+        if (attempt < maxRetries) {
+          const delay = baseDelayMs * 2 ** attempt;
+          logger.warn(`Reconnect attempt ${attempt + 1} failed for '${name}', retrying in ${delay}ms...`);
+          await new Promise((r) => setTimeout(r, delay));
+        }
+      }
+    }
+    throw lastError!;
+  }
+
+  /** Health-check all connected servers (tries listing tools) */
+  async healthCheck(): Promise<ServerHealth[]> {
+    const results = await Promise.allSettled(
+      Array.from(this.instances.entries()).map(async ([name, inst]): Promise<ServerHealth> => {
+        const start = Date.now();
+        try {
+          const { tools } = await inst.client.listTools();
+          return { name, connected: true, healthy: true, toolCount: tools.length, latencyMs: Date.now() - start };
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          return { name, connected: true, healthy: false, error: msg, latencyMs: Date.now() - start };
+        }
+      }),
+    );
+
+    return results.map((r) => {
+      if (r.status === "fulfilled") return r.value;
+      return { name: "unknown", connected: false, healthy: false, error: String(r.reason) };
+    });
+  }
+
+  /** Get status summary of all servers */
+  getServerStatus(): Array<{ name: string; connected: boolean; transport: string }> {
+    return Array.from(this.instances.entries()).map(([name, inst]) => ({
+      name,
+      connected: true,
+      transport: this.configs.get(name)?.transport ?? (this.configs.get(name)?.command ? "stdio" : "unknown"),
+    }));
   }
 
   /** Disconnect all servers */
